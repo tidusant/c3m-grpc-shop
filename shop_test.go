@@ -34,7 +34,7 @@ func setup() {
 	userLogin := rpch.GetLogin(testsession)
 	shopChangeId, _ = primitive.ObjectIDFromHex("59a275355f4aec1b026b6f5e")             //shopname: Colis
 	shopOriginId, _ = primitive.ObjectIDFromHex("5955d130e761cf70ffb8e49b")             //shopname: demo
-	shopChangeNoPermissionId, _ = primitive.ObjectIDFromHex("5a52f89a7b4b30ed5ecfce9d") //shopname: Hoa Giay
+	shopChangeNoPermissionId, _ = primitive.ObjectIDFromHex("5a52f89a7b4b30ed5ecfce9d") //shopname: Hoa Giay test
 	userId = userLogin.UserId
 	shopId = userLogin.ShopId
 	//change to demoshop
