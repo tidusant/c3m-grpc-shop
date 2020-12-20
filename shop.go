@@ -1,7 +1,14 @@
 package main
 
 import (
-	"colis/common/mystring"
+	"github.com/tidusant/c3m-common/log"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+
+	"github.com/tidusant/c3m-common/c3mcommon"
+	pb "github.com/tidusant/c3m-grpc-protoc/protoc"
+	rpch "github.com/tidusant/chadmin-repo/cuahang"
+	"github.com/tidusant/chadmin-repo/models"
+
 	"encoding/json"
 	"fmt"
 	"net"
@@ -9,13 +16,6 @@ import (
 	"os"
 	"strconv"
 
-	"strings"
-
-	c3mcommon "colis/common/common"
-	"colis/common/log"
-	pb "colis/grpcs/protoc"
-	"colis/models"
-	rpch "colis/repos/cuahang"
 	"context"
 	"google.golang.org/grpc"
 )
@@ -31,21 +31,23 @@ type service struct {
 
 func (s *service) Call(ctx context.Context, in *pb.RPCRequest) (*pb.RPCResponse, error) {
 	resp := &pb.RPCResponse{Data: "Hello " + in.GetAppName(), RPCName: name, Version: ver}
-	rs := c3mcommon.ReturnJsonMessage("0", "Unknow error.", "", "")
+	rs := models.RequestResult{}
 	//get input data into user session
 	var usex models.UserSession
 	usex.Session = in.Session
 	usex.Action = in.Action
-	usex.UserID = in.UserID
+
 	usex.UserIP = in.UserIP
 	usex.Params = in.Params
+	usex.UserID, _ = primitive.ObjectIDFromHex(in.UserID)
 
 	//check shop permission
 	if in.ShopID != "" {
-		shop := rpch.GetShopById(usex.UserID, in.ShopID)
+		shopidObj, _ := primitive.ObjectIDFromHex(in.ShopID)
+		shop := rpch.GetShopById(usex.UserID, shopidObj)
 		if shop.Status == 0 {
 			if usex.Action != "lsi" {
-				rs = c3mcommon.ReturnJsonMessage("-4", "Site is disabled.", "", "")
+				rs.Error = "Site is disable"
 			}
 		}
 		usex.Shop = shop
@@ -67,6 +69,9 @@ func (s *service) Call(ctx context.Context, in *pb.RPCRequest) (*pb.RPCResponse,
 		rs = configSave(usex)
 	} else if usex.Action == "lims" {
 		rs = getShopLimits(usex)
+	} else {
+		//unknow action
+		return resp, nil
 	}
 	//convert RequestResult into json
 	b, _ := json.Marshal(rs)
@@ -103,11 +108,11 @@ func loadshopinfo(usex models.UserSession) models.RequestResult {
 	strrt += `,"ShopConfigs":` + string(b)
 
 	//maxfileupload
-	strrt += `,"MaxFileUpload":` + strconv.Itoa(rpch.GetShopLimitbyKey(usex.Shop.ID.Hex(), "maxfileupload"))
-	strrt += `,"MaxSizeUpload":` + strconv.Itoa(rpch.GetShopLimitbyKey(usex.Shop.ID.Hex(), "maxsizeupload"))
+	strrt += `,"MaxFileUpload":` + strconv.Itoa(rpch.GetShopLimitbyKey(usex.Shop.ID, "maxfileupload"))
+	strrt += `,"MaxSizeUpload":` + strconv.Itoa(rpch.GetShopLimitbyKey(usex.Shop.ID, "maxsizeupload"))
 
 	//orther shop
-	otherShops := rpch.GetOtherShopById(usex.UserID, usex.Shop.ID.Hex())
+	otherShops := rpch.GetOtherShopById(usex.UserID, usex.Shop.ID)
 	strrt += `,"Others":[`
 	for _, shop := range otherShops {
 		strrt += `{"Name":"` + shop.Name + `","ID":"` + shop.ID.Hex() + `"},`
@@ -122,88 +127,91 @@ func loadshopinfo(usex models.UserSession) models.RequestResult {
 	user := rpch.GetUserInfo(usex.UserID)
 	strrt += `,"User":{"Name":"` + user.Name + `"}`
 	strrt += "}"
-
-	return c3mcommon.ReturnJsonMessage("1", "", "success", strrt)
+	return models.RequestResult{Status: 1, Error: "", Message: "", Data: strrt}
 
 }
 
 func changeShop(usex models.UserSession) models.RequestResult {
-	shopchange := rpch.UpdateShopLogin(usex.Session, usex.Params)
-	if shopchange.ID.Hex() == "" {
-		return c3mcommon.ReturnJsonMessage("0", "Change shop fail.", "", "")
+	shopidObj, _ := primitive.ObjectIDFromHex(usex.Params)
+	shopchange := rpch.UpdateShopLogin(usex.Session, shopidObj)
+	if shopchange.ID == primitive.NilObjectID {
+		return models.RequestResult{Error: "Change shop fail"}
+
 	}
 	//change shopid
 	usex.Shop = shopchange
 	return loadshopinfo(usex)
 }
 func configSave(usex models.UserSession) models.RequestResult {
-	var config ConfigViewData
+	//var config ConfigViewData
 
-	err := json.Unmarshal([]byte(usex.Params), &config)
-	if !c3mcommon.CheckError("json parse page", err) {
-		return c3mcommon.ReturnJsonMessage("0", "json parse fail", "", "")
-	}
-	usex.Shop.Config = config.ShopConfigs
-	rpch.SaveShopConfig(usex.Shop)
-
-	// //save template config
-	str := `{"Code":"` + usex.Shop.Theme + `","TemplateConfigs":[{}`
-	for _, conf := range config.TemplateConfigs {
-		str += `,{"Key":"` + conf.Key + `","Value":"` + conf.Value + `"}`
-	}
-	str += `]`
-	b, _ := json.Marshal(config.BuildConfigs)
-	str += `,"BuildConfig":` + string(b) + `}`
-
-	request := "savetemplateconfig|" + usex.Session
-	resp := c3mcommon.RequestBuildService(request, "POST", str)
-
-	if resp.Status != "1" {
-		return resp
-	}
-
-	// //save build config
-
-	// var bcf models.BuildConfig
-	// bcf = config.BuildConfigs
-	// bcf.ShopId = usex.Shop.ID.Hex()
-	// rpb.SaveConfig(bcf)
-	//rebuild config
-	rpch.Rebuild(usex)
-	return c3mcommon.ReturnJsonMessage("1", "", "success", "")
+	//err := json.Unmarshal([]byte(usex.Params), &config)
+	//if !c3mcommon.CheckError("json parse page", err) {
+	//	return models.RequestResult{Error: "json parse fail"}
+	//}
+	//usex.Shop.Config = config.ShopConfigs
+	//rpch.SaveShopConfig(usex.Shop)
+	//
+	//// //save template config
+	//str := `{"Code":"` + usex.Shop.Theme + `","TemplateConfigs":[{}`
+	//for _, conf := range config.TemplateConfigs {
+	//	str += `,{"Key":"` + conf.Key + `","Value":"` + conf.Value + `"}`
+	//}
+	//str += `]`
+	//b, _ := json.Marshal(config.BuildConfigs)
+	//str += `,"BuildConfig":` + string(b) + `}`
+	//
+	//request := "savetemplateconfig|" + usex.Session
+	//resp := c3mcommon.RequestBuildService(request, "POST", str)
+	//
+	//if resp.Status != 1 {
+	//	return resp
+	//}
+	//
+	//// //save build config
+	//
+	//// var bcf models.BuildConfig
+	//// bcf = config.BuildConfigs
+	//// bcf.ShopId = usex.Shop.ID
+	//// rpb.SaveConfig(bcf)
+	////rebuild config
+	//rpch.Rebuild(usex)
+	//return c3mcommon.ReturnJsonMessage("1", "", "success", "")
+	return models.RequestResult{Status: 1}
 
 }
 func configGetAll(usex models.UserSession) models.RequestResult {
-	var config ConfigViewData
-	config.ShopConfigs = usex.Shop.Config
-	log.Debugf("configGetAll")
-	request := "gettemplateconfig|" + usex.Session
-	resp := c3mcommon.RequestBuildService(request, "POST", usex.Shop.Theme)
-	log.Debugf("RequestBuildService call done")
-	if resp.Status != "1" {
-		return resp
-	}
-	var confs struct {
-		TemplateConfigs []ConfigItem
-		BuildConfigs    models.BuildConfig
-	}
-	json.Unmarshal([]byte(resp.Data), &confs)
-
-	config.TemplateConfigs = confs.TemplateConfigs
-	config.BuildConfigs = confs.BuildConfigs
-	config.BuildConfigs.ID = ""
-	config.BuildConfigs.ShopId = ""
-	b, _ := json.Marshal(config)
-
-	return c3mcommon.ReturnJsonMessage("1", "", "success", string(b))
+	//var config ConfigViewData
+	//config.ShopConfigs = usex.Shop.Config
+	//log.Debugf("configGetAll")
+	//request := "gettemplateconfig|" + usex.Session
+	//resp := c3mcommon.RequestBuildService(request, "POST", usex.Shop.Theme)
+	//log.Debugf("RequestBuildService call done")
+	//if resp.Status != 1 {
+	//	return resp
+	//}
+	//var confs struct {
+	//	TemplateConfigs []ConfigItem
+	//	BuildConfigs    models.BuildConfig
+	//}
+	//json.Unmarshal([]byte(resp.Data), &confs)
+	//
+	//config.TemplateConfigs = confs.TemplateConfigs
+	//config.BuildConfigs = confs.BuildConfigs
+	//config.BuildConfigs.ID = ""
+	//config.BuildConfigs.ShopId = ""
+	//b, _ := json.Marshal(config)
+	//
+	//return c3mcommon.ReturnJsonMessage("1", "", "success", string(b))
+	return models.RequestResult{Status: 1}
 
 }
 func getShopLimits(usex models.UserSession) models.RequestResult {
 
-	limits := rpch.GetShopLimits(usex.Shop.ID.Hex())
+	limits := rpch.GetShopLimits(usex.Shop.ID)
 
 	b, _ := json.Marshal(limits)
-	return c3mcommon.ReturnJsonMessage("1", "", "success", string(b))
+	return models.RequestResult{Status: 1, Error: "", Data: string(b)}
 
 }
 
@@ -233,76 +241,82 @@ func getShopLimits(usex models.UserSession) models.RequestResult {
 // }
 
 func doCreateAlbum(usex models.UserSession) models.RequestResult {
-	albumname := usex.Params
-	if albumname == "" {
-		return c3mcommon.ReturnJsonMessage("0", "albumname empty", "", "")
-	}
-	//get config
-
-	if usex.Shop.ID.Hex() == "" {
-		return c3mcommon.ReturnJsonMessage("0", "shop not found", "", "")
-	}
-
-	// if usex.Shop.Config.Level == 0 {
-	// 	return c3mcommon.ReturnJsonMessage("0", "config error", "", "")
-
-	// }
-	// if usex.Shop.Config.MaxAlbum <= len(usex.Shop.Albums) {
-	// 	return c3mcommon.ReturnJsonMessage("2", "album count limited", "", "")
-	// }
-
-	slug := strings.ToLower(mystring.Camelize(mystring.Asciify(albumname)))
-	albumslug := slug
-	if slug == "" {
-		return c3mcommon.ReturnJsonMessage("0", "albumslug empty", "", "")
-	}
-
-	//save albumname
-	var album models.ShopAlbum
-	album.Slug = albumslug
-	album.Name = albumname
-	album.ShopID = usex.Shop.ID.Hex()
-	album.UserId = usex.UserID
-	album = rpch.SaveAlbum(album)
-	b, _ := json.Marshal(album)
-
-	return c3mcommon.ReturnJsonMessage("1", "", "success", string(b))
+	//albumname := usex.Params
+	//if albumname == "" {
+	//	return models.RequestResult{Error:"album's name empty"}
+	//
+	//}
+	////get config
+	//
+	//if usex.Shop.ID == "" {
+	//	return models.RequestResult{Error:"shop not found"}
+	//
+	//}
+	//
+	//// if usex.Shop.Config.Level == 0 {
+	//// 	return c3mcommon.ReturnJsonMessage("0", "config error", "", "")
+	//
+	//// }
+	//// if usex.Shop.Config.MaxAlbum <= len(usex.Shop.Albums) {
+	//// 	return c3mcommon.ReturnJsonMessage("2", "album count limited", "", "")
+	//// }
+	//
+	//slug := strings.ToLower(mystring.Camelize(mystring.Asciify(albumname)))
+	//albumslug := slug
+	//if slug == "" {
+	//	return models.RequestResult{Error:"album's slug empty"}
+	//
+	//}
+	//
+	////save albumname
+	//var album models.ShopAlbum
+	//album.Slug = albumslug
+	//album.Name = albumname
+	//album.ShopID = usex.Shop.ID
+	//album.UserId = usex.UserID
+	//album = rpch.SaveAlbum(album)
+	//b, _ := json.Marshal(album)
+	//
+	//return c3mcommon.ReturnJsonMessage("1", "", "success", string(b))
+	return models.RequestResult{Status: 1}
 
 }
 func doLoadalbum(usex models.UserSession) models.RequestResult {
 
-	//get albums
-	albums := rpch.LoadAllShopAlbums(usex.Shop.ID.Hex())
-	if len(albums) == 0 {
-		//create
-		var album models.ShopAlbum
-		album.Slug = "default"
-		album.Name = "Default"
-		album.ShopID = usex.Shop.ID.Hex()
-		album.UserId = usex.UserID
-		album = rpch.SaveAlbum(album)
-		albums = append(albums, album)
-	}
+	////get albums
+	//albums := rpch.LoadAllShopAlbums(usex.Shop.ID)
+	//if len(albums) == 0 {
+	//	//create
+	//	var album models.ShopAlbum
+	//	album.Slug = "default"
+	//	album.Name = "Default"
+	//	album.ShopID = usex.Shop.ID
+	//	album.UserId = usex.UserID
+	//	album = rpch.SaveAlbum(album)
+	//	albums = append(albums, album)
+	//}
+	//
+	//b, err := json.Marshal(albums)
+	//c3mcommon.CheckError("json parse doLoadalbum", err)
+	//return c3mcommon.ReturnJsonMessage("1", "", "", string(b))
 
-	b, err := json.Marshal(albums)
-	c3mcommon.CheckError("json parse doLoadalbum", err)
-	return c3mcommon.ReturnJsonMessage("1", "", "", string(b))
+	return models.RequestResult{Status: 1}
 
 }
 func doEditAlbum(usex models.UserSession) models.RequestResult {
-	//log.Debugf("update album ")
-	var newitem models.ShopAlbum
-	log.Debugf("Unmarshal %s", usex.Params)
-	err := json.Unmarshal([]byte(usex.Params), &newitem)
-	if !c3mcommon.CheckError("json parse page", err) {
-		return c3mcommon.ReturnJsonMessage("0", "json parse ShopAlbum fail", "", "")
-	}
-	newitem.ShopID = usex.Shop.ID.Hex()
-	newitem.UserId = usex.UserID
-	rpch.SaveAlbum(newitem)
-	//log.Debugf("update album false %s", albumname)
-	return c3mcommon.ReturnJsonMessage("0", "album not found", "", "")
-
+	////log.Debugf("update album ")
+	//var newitem models.ShopAlbum
+	//log.Debugf("Unmarshal %s", usex.Params)
+	//err := json.Unmarshal([]byte(usex.Params), &newitem)
+	//if !c3mcommon.CheckError("json parse page", err) {
+	//	return c3mcommon.ReturnJsonMessage("0", "json parse ShopAlbum fail", "", "")
+	//}
+	//newitem.ShopID = usex.Shop.ID
+	//newitem.UserId = usex.UserID
+	//rpch.SaveAlbum(newitem)
+	////log.Debugf("update album false %s", albumname)
+	//return c3mcommon.ReturnJsonMessage("0", "album not found", "", "")
+	return models.RequestResult{Status: 1}
 }
 func main() {
 	//default port for service
