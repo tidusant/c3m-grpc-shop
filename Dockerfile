@@ -6,10 +6,5 @@ WORKDIR /app
 # Copy exec file and config
 COPY main ./
 
-# Build the Go app
-#RUN go build -o main .
-
-# Expose port to the outside world
-#EXPOSE 9191
 # Run the executable
 CMD ["./main"]
